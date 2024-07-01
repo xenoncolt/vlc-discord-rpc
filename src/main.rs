@@ -2,10 +2,13 @@ use discord_rpc_client::Client as DiscordClient;
 use anyhow::{Result, anyhow};
 use reqwest::Error;
 use serde::Deserialize;
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
+use std::vec;
 use vlc_rc::Client as VlcClient;
 use regex::Regex;
+use tokio::sync::Mutex;
 
 #[derive(Deserialize)]
 struct MovieData {
@@ -42,21 +45,30 @@ async fn fetch_movie_data(title: &str, api_key: &str) -> Result<MovieData> {
 
     if let Some(movie) = response["results"].as_array().and_then(|a| a.get(0)) {
         let title = movie["title"].as_str().unwrap_or("").to_string();
-        let genres = movie["genre_ids"].as_array().unwrap_or(&vec![]).iter().map(|genre| Genre {
-            name: genre.as_str().unwrap_or("").to_string(),
-        })
-        .collect();
-    
-    let poster_path = movie["poster_path"].as_str().unwrap_or("").to_string();
+        let genre_ids = movie["genre_ids"].as_array().unwrap_or(&vec![]).iter().map(|gen| gen.as_i64().unwrap_or(0)).collect::<Vec<_>>();
+        let genres: Vec<Genre> = fetch_genres(&genre_ids, api_key).await?.into_iter().map(|name| Genre { name }).collect(); // Convert Vec<String> to Vec<Genre>
 
-    Ok(MovieData {
-        title,
-        genres,
-        poster_path,
-    })
+        let poster_path = movie["poster_path"].as_str().unwrap_or("").to_string();
+
+        Ok(MovieData {
+            title,
+            genres,
+            poster_path,
+        })
     } else {
         Err(anyhow!("Movie not found"))
     }
+}
+
+async fn fetch_genres(genre_ids: &[i64], api_key: &str) -> Result<Vec<String>> {
+    let url = format!("https://api.themoviedb.org/3/genre/movie/list?api_key={}", api_key);
+    let response: serde_json::Value = reqwest::get(&url).await?.json().await?;
+
+    let genres = genre_ids.iter()
+        .filter_map(|id| response["genres"].as_array().unwrap_or(&vec![]).iter()
+            .find(|g| g["id"].as_i64() == Some(*id)).and_then(|ge| ge["name"].as_str().map(|s| s.to_string())))
+        .collect();
+    Ok(genres)
 }
 
 async fn fetch_tv_show_data(name: &str, api_key: &str) -> Result<TVShowData> {
@@ -142,40 +154,47 @@ async fn main() {
     let client_id = env!("CLIENT_ID");
     let api_key = env!("API_KEY");
 
-    let mut discord_client = DiscordClient::new(client_id.parse().unwrap());
-    discord_client.start();
+    let discord_client = Arc::new(Mutex::new(DiscordClient::new(client_id.parse().unwrap())));
+    discord_client.lock().await.start();
     println!("Discord client started.");
 
     let vlc_host = "127.0.0.1:9090";
 
-    let mut vlc_client = match VlcClient::connect(vlc_host) {
-        Ok(client) => {
-            println!("Connected to VLC at {}", vlc_host);
-            client
+    let vlc_client = Arc::new(Mutex::new(
+        match VlcClient::connect(vlc_host) {
+            Ok(client) => {
+                println!("Connected to VLC at {}", vlc_host);
+                client
+            }
+            Err(e) => {
+                println!("Failed to connect to VLC: {:?}", e);
+                return;
+            }
         }
-        Err(e) => {
-            println!("Failed to connect to VLC: {:?}", e);
-            return;
-        }
-    };
+    ));
 
     loop {
-        println!("Checking if VLC is playing...");
-        if vlc_client.is_playing().unwrap_or(false) {
-            println!("VLC is playing...");
+        let vlc_client = vlc_client.clone();
+        let discord_client = discord_client.clone();
+        let api_key = api_key.to_string();
 
-            if let Ok(Some(title)) = vlc_client.get_title() {
-                let cleaned_title = clean_title(&title);
-                println!("Now playing: {:?}", title);
-                println!("Cleaned title: {:?}", cleaned_title);
+        tokio::spawn(async move {
+            println!("Checking if VLC is playing...");
+            if vlc_client.lock().await.is_playing().unwrap_or(false) {
+                println!("VLC is playing...");
+
+                if let Ok(Some(title)) = vlc_client.lock().await.get_title() {
+                    let cleaned_title = clean_title(&title);
+                    println!("Now playing: {:?}", title);
+                    println!("Cleaned title: {:?}", cleaned_title);
 
                 if let Ok(movie_data) = fetch_movie_data(&cleaned_title, &api_key).await {
                     // println!("Fetched movie data: {:?}", movie_data);
-                    let genre = movie_data.genres.first().map(|g| g.name.clone()).unwrap_or_default();
-                    let details = format!("Genre: {}", genre);
+                    let genres: Vec<String> = movie_data.genres.iter().map(|gen| gen.name.clone()).collect();
+                    let details = format!("Genres: {}", genres.join(", "));
                     let poster_url = format!("https://image.tmdb.org/t/p/w500{}", movie_data.poster_path);
 
-                    update_discord_presence(&mut discord_client, &movie_data.title, &details, &poster_url);
+                    update_discord_presence(&mut *discord_client.lock().await, &movie_data.title, &details, &poster_url);
                 } else if let Ok(tv_show_data) = fetch_tv_show_data(&cleaned_title, &api_key).await {
                     // println!("Fetched TV show data: {:?}", tv_show_data);
 
@@ -191,7 +210,7 @@ async fn main() {
                         );
                         let poster_url = format!("https://image.tmdb.org/t/p/w500{}", tv_show_data.poster_path);
 
-                        update_discord_presence(&mut discord_client, &episode_data.name, &details, &poster_url);
+                        update_discord_presence(&mut *discord_client.lock().await, &episode_data.name, &details, &poster_url);
                     }
                 } else {
                     println!("Could not find movie or TV show data for title: {:?}", title);
@@ -202,6 +221,7 @@ async fn main() {
         } else {
             println!("VLC is not playing.");
         }
+        });
 
         sleep(Duration::from_secs(10)); // Adjust the sleep duration as needed
     }
