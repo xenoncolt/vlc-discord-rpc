@@ -1,4 +1,4 @@
-use discord_rpc_client::Client as DiscordClient;
+use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 use anyhow::{Result, anyhow};
 use reqwest::Error;
 use serde::Deserialize;
@@ -110,15 +110,17 @@ async fn fetch_episode_data(show_id: u32, season: u32, episode: u32, api_key: &s
 }
 
 fn update_discord_presence(
-    client: &mut DiscordClient,
+    client: &mut DiscordIpcClient,
     title: &str,
     details: &str,
     large_image_key: &str,
 ) {
-    println!("Update discord Presence: {}, Details: {}, image: {}", title, details, large_image_key);
-    let _ = client.set_activity(|act| {
-        act.details(title).state(details).assets(|asset| asset.large_image(large_image_key).large_text(title))
-    });
+    println!("Update Discord Rich Presence: {}, Details: {}, Image: {}", title, details, large_image_key);
+    let _ = client.set_activity(activity::Activity::new()
+        .state(details)
+        .details(title)
+        .assets(activity::Assets::new().large_image(large_image_key).large_text(title))
+    );
 }
 
 fn clean_title(title: &str) -> String {
@@ -154,8 +156,8 @@ async fn main() {
     let client_id = env!("CLIENT_ID");
     let api_key = env!("API_KEY");
 
-    let discord_client = Arc::new(Mutex::new(DiscordClient::new(client_id.parse().unwrap())));
-    discord_client.lock().await.start();
+    let mut discord_client = DiscordIpcClient::new(client_id).expect("Failed to create DiscordIpcClient");
+    discord_client.connect().expect("Failed to connect to discord client.");
     println!("Discord client started.");
 
     let vlc_host = "127.0.0.1:9090";
@@ -174,12 +176,7 @@ async fn main() {
     ));
 
     loop {
-        let vlc_client = vlc_client.clone();
-        let discord_client = discord_client.clone();
-        let api_key = api_key.to_string();
-
-        tokio::spawn(async move {
-            println!("Checking if VLC is playing...");
+        println!("Checking if VLC is playing...");
             if vlc_client.lock().await.is_playing().unwrap_or(false) {
                 println!("VLC is playing...");
 
@@ -194,7 +191,7 @@ async fn main() {
                     let details = format!("Genres: {}", genres.join(", "));
                     let poster_url = format!("https://image.tmdb.org/t/p/w500{}", movie_data.poster_path);
 
-                    update_discord_presence(&mut *discord_client.lock().await, &movie_data.title, &details, &poster_url);
+                    update_discord_presence(&mut discord_client, &movie_data.title, &details, &poster_url);
                 } else if let Ok(tv_show_data) = fetch_tv_show_data(&cleaned_title, &api_key).await {
                     // println!("Fetched TV show data: {:?}", tv_show_data);
 
@@ -210,7 +207,7 @@ async fn main() {
                         );
                         let poster_url = format!("https://image.tmdb.org/t/p/w500{}", tv_show_data.poster_path);
 
-                        update_discord_presence(&mut *discord_client.lock().await, &episode_data.name, &details, &poster_url);
+                        update_discord_presence(&mut discord_client, &episode_data.name, &details, &poster_url);
                     }
                 } else {
                     println!("Could not find movie or TV show data for title: {:?}", title);
@@ -221,8 +218,6 @@ async fn main() {
         } else {
             println!("VLC is not playing.");
         }
-        });
-
         sleep(Duration::from_secs(10)); // Adjust the sleep duration as needed
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "vlc-discord-rpc"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 build = "src/build.rs"
 
@@ -8,9 +8,9 @@ build = "src/build.rs"
 reqwest = { version = "0.12.5", features = ["json"] }
 serde = { version = "1.0.203", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
-discord-rpc-client = "0.4.0"
 serde_json = "1.0.118"
 anyhow = "1.0.86"
 vlc-rc = "0.1.1"
 regex = "1.10.5"
 dotenv = "0.15.0"
+discord-rich-presence = "0.2.4"
