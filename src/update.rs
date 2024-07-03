@@ -13,7 +13,7 @@ pub async fn update() {
     let release: serde_json::Value = response_client.json().await.expect("Failed to parse response to json"); // parse response to json
     let latest_version = Version::parse(release["tag_name"].as_str().unwrap()).expect("Failed to get the latest version"); // parse latest version string to Version struct
 
-    let exe_path = env::current_exe().expect("Failed to find exe path");
+    let exe_path = env::current_dir().unwrap().join("vlc-discord-rpc.exe");
 
     let temp_file = env::current_dir().unwrap().join("new-version.exe"); 
     let download_url = release["assets"][0]["browser_download_url"].as_str().unwrap();
@@ -41,14 +41,15 @@ pub async fn update() {
         if input.trim() == "y" || input.trim() == "yes" {
             // changing file 
             fs::write(&exe_path, content).expect("Failed to replace exe file");
-            println!("Updated to version {}", latest_version);
-            println!("Please stand by while we are starting RPC");
+            println!("Updated to version {}", latest_version); //pure useless like me
+            println!("Please stand by while we are starting RPC"); //pure useless like me
             Command::new("cmd").args(&["/C", "start", exe_path.to_str().unwrap()]).spawn().expect("Failed to start new version"); // open vlc-discord-rpc.exe shell
         } else {
             print!("Exiting....");
             Command::new("cmd").args(&["/C", "start", exe_path.to_str().unwrap()]).spawn().expect("Failed to restart program");
-            fs::remove_file(&temp_file).expect("Failed to delete new version"); // remove new-version.exe
+            return;
         }
+        fs::remove_file(&temp_file).expect("Failed to delete new version"); // remove new-version.exe
         std::process::exit(0); 
     }
 }
