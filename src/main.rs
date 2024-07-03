@@ -152,7 +152,8 @@ fn clean_title(title: &str) -> String {
 #[tokio::main]
 async fn main() {
     // checking update
-    update::update().await;
+    
+    update::update().await; // i know i waste my time 
     println!("Starting VLC Discord RPC...");
 
     // let client_id = env::var("CLIENT_ID").expect("CLIENT_ID must be set in .env file");
