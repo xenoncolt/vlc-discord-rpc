@@ -24,14 +24,24 @@ pub async fn update() {
     let content = response_url.bytes().await.expect("Something Wrong! Latest version is not right or broken");
 
     // don't know why i do this :<
-    if latest_version > current_version {
-        println!("You are using an older version v{}, updating...", current_version);
+    if latest_version > current_version && !path::Path::new(&temp_file).exists() {
+        // asking stuff
+        let mut input = String::new();
+        print!("Do you want to install new version? (y/n): ");
+        stdout().flush().unwrap();
+        stdin().read_line(&mut input).unwrap();
+        if input.trim() == "y" || input.trim() == "yes" {
+            println!("You are using an older version v{}, updating...", current_version);
         
-        fs::write(&temp_file, &content).expect("Failed to write new exe file"); // new version file as a temporary file
+            fs::write(&temp_file, &content).expect("Failed to write new exe file"); // new version file as a temporary file
 
-        Command::new("cmd").args(&["/C", "start", temp_file.to_str().unwrap()]).spawn().expect("Failed to start new-version.exe"); // open new-version.exe shell
+            Command::new("cmd").args(&["/C", "start", temp_file.to_str().unwrap()]).spawn().expect("Failed to start new-version.exe"); // open new-version.exe shell
 
-        std::process::exit(0);
+            std::process::exit(0);
+        } else {
+            print!("Exiting....");
+            return;
+        }
     }
 
     // if i knew she was tired, not gonna waste my 7 hours 
@@ -44,24 +54,12 @@ pub async fn update() {
     // wasted my full brain here
     if path::Path::new(&temp_file).exists() { // new-version.exe not exist
 
-        // asking stuff
-        let mut input = String::new();
-        print!("Do you want to install new version? (y/n): ");
-        stdout().flush().unwrap();
-        stdin().read_line(&mut input).unwrap();
-        if input.trim() == "y" || input.trim() == "yes" {
-            // changing file 
-            fs::write(&exe_path, &content).expect("Failed to replace exe file");
-            println!("Updated to version {}", latest_version); //pure useless like me
-            println!("Please stand by while we are starting RPC"); //pure useless like me
-            Command::new("cmd").args(&["/C", "start", exe_path.to_str().unwrap()]).spawn().expect("Failed to start new version"); // open vlc-discord-rpc.exe shell
-            std::process::exit(0);
-        } else {
-            print!("Exiting....");
-            Command::new("cmd").args(&["/C", "start", exe_path.to_str().unwrap()]).spawn().expect("Failed to restart program");
-            fs::remove_file(&temp_file).expect("Failed to delete new version"); // remove new-version.exe
-            stdout().flush().unwrap();
-            std::process::exit(0);
-        }
+        // changing file 
+        fs::write(&exe_path, &content).expect("Failed to replace exe file");
+        println!("Updated to version {}", latest_version); //pure useless like me
+        println!("Please stand by while we are starting RPC"); //pure useless like me
+        Command::new("cmd").args(&["/C", "start", exe_path.to_str().unwrap()]).spawn().expect("Failed to start new version"); // open vlc-discord-rpc.exe shell
+        std::process::exit(0);
+        
     }
 }
