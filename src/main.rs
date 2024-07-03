@@ -1,3 +1,5 @@
+mod update;
+
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 use anyhow::{Result, anyhow};
 use reqwest::Error;
@@ -115,7 +117,7 @@ fn update_discord_presence(
     details: &str,
     large_image_key: &str,
 ) {
-    println!("Update Discord Rich Presence: {}, Details: {}, Image: {}", title, details, large_image_key);
+    // println!("Update Discord Rich Presence: {}, Details: {}, Image: {}", title, details, large_image_key);
     let _ = client.set_activity(activity::Activity::new()
         .state(details)
         .details(title)
@@ -149,6 +151,8 @@ fn clean_title(title: &str) -> String {
 
 #[tokio::main]
 async fn main() {
+    // checking update
+    update::update().await;
     println!("Starting VLC Discord RPC...");
 
     // let client_id = env::var("CLIENT_ID").expect("CLIENT_ID must be set in .env file");
@@ -182,8 +186,8 @@ async fn main() {
 
                 if let Ok(Some(title)) = vlc_client.lock().await.get_title() {
                     let cleaned_title = clean_title(&title);
-                    println!("Now playing: {:?}", title);
-                    println!("Cleaned title: {:?}", cleaned_title);
+                    // println!("Now playing: {:?}", title);
+                    // println!("Cleaned title: {:?}", cleaned_title);
 
                 if let Ok(movie_data) = fetch_movie_data(&cleaned_title, &api_key).await {
                     // println!("Fetched movie data: {:?}", movie_data);
