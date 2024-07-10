@@ -43,7 +43,7 @@ async fn fetch_movie_data(title: &str, api_key: &str) -> Result<MovieData> {
     println!("Fetching movie data for title: {}", title);
     let url = format!("https://api.themoviedb.org/3/search/movie?api_key={}&query={}", api_key, title);
     let response: serde_json::Value = reqwest::get(&url).await?.json().await?;
-    println!("Received response for movie data: {:?}", response);
+    // println!("Received response for movie data: {:?}", response);
 
     if let Some(movie) = response["results"].as_array().and_then(|a| a.get(0)) {
         let title = movie["title"].as_str().unwrap_or("").to_string();

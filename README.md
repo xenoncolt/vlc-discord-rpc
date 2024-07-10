@@ -7,11 +7,11 @@ A discord rich presence application which will show what you are watching on VLC
 ### Full profile
 ![preview](https://media.discordapp.net/attachments/832180255103385650/1258048989664907314/image.png?ex=6686a0ec&is=66854f6c&hm=5fad0d77594ab29e0e4c910368a485bc4c354308921c660a3fa2bc97b20b42da&=&format=webp&quality=lossless&width=272&height=497)
 
-# System usages
+### System usages
 ![preview](https://media.discordapp.net/attachments/832180255103385650/1258048718620590090/image.png?ex=6686a0ab&is=66854f2b&hm=f014537fb9962da383a3b89cefd9b37c4fd99211005b9acdf49d950d76af933d&=&format=webp&quality=lossless)
 
 # Setup
-For setup instructions refer to the [Wiki](https://github.com/xenoncolt/vlc-discord-rpc/wiki)
+For setup instructions refer to the [Wiki](https://github.com/xenoncolt/vlc-discord-rpc/wiki/Setup)
 
 # Installation
 For installation instructions refer to the [Wiki](https://github.com/xenoncolt/vlc-discord-rpc/wiki)
