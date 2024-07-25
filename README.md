@@ -14,4 +14,4 @@ A discord rich presence application which will show what you are watching on VLC
 For setup instructions refer to the [Wiki](https://github.com/xenoncolt/vlc-discord-rpc/wiki/Setup)
 
 # Installation
-For installation instructions refer to the [Wiki](https://github.com/xenoncolt/vlc-discord-rpc/wiki)
+For installation instructions refer to the [Wiki](https://github.com/xenoncolt/vlc-discord-rpc/wiki/Setup)
