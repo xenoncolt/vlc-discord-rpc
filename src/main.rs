@@ -87,8 +87,6 @@ async fn fetch_tv_show_data(name: &str, api_key: &str) -> Result<TVShowData> {
         let name = show["name"].as_str().unwrap_or("").to_string();
         let poster_path = show["poster_path"].as_str().unwrap_or("").to_string();
 
-        println!("{:?}", name);
-
         let show_detail_url = format!("https://api.themoviedb.org/3/tv/{}?api_key={}", tmdb_id, api_key);
         let show_detail_response: serde_json::Value = reqwest::get(&show_detail_url).await?.json().await?;
         let imdb_id = show_detail_response["external_ids"]["imdb_id"].as_str().map(|s|s.to_string());
