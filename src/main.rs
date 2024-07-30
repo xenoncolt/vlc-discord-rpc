@@ -2,7 +2,6 @@ mod update;
 
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 use anyhow::{Result, anyhow};
-use reqwest::Error;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::thread::sleep;
@@ -32,13 +31,6 @@ struct TVShowData {
     name: String,
     poster_path: String,
     imdb_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct EpisodeData {
-    name: String,
-    season_number: u32,
-    episode_number: u32,
 }
 
 
@@ -86,14 +78,16 @@ async fn fetch_genres(genre_ids: &[i64], api_key: &str) -> Result<Vec<String>> {
 
 async fn fetch_tv_show_data(name: &str, api_key: &str) -> Result<TVShowData> {
     println!("Fetching TV Show data for name: {}", name);
-    let url = format!("https://api.themoviedb.org/3/search/movie?api_key={}&query={}", api_key, name);
+    let url = format!("https://api.themoviedb.org/3/search/tv?api_key={}&query={}", api_key, name);
     let response: serde_json::Value = reqwest::get(&url).await?.json().await?;
-    println!("Received response for TV Show data: {:?}", response);
+    // println!("Received response for TV Show data: {:?}", response);
 
     if let Some(show) = response["results"].as_array().and_then(|a| a.get(0)) {
         let tmdb_id =  show["id"].as_u64().unwrap_or(0) as u32;
         let name = show["name"].as_str().unwrap_or("").to_string();
         let poster_path = show["poster_path"].as_str().unwrap_or("").to_string();
+
+        println!("{:?}", name);
 
         let show_detail_url = format!("https://api.themoviedb.org/3/tv/{}?api_key={}", tmdb_id, api_key);
         let show_detail_response: serde_json::Value = reqwest::get(&show_detail_url).await?.json().await?;
@@ -108,23 +102,6 @@ async fn fetch_tv_show_data(name: &str, api_key: &str) -> Result<TVShowData> {
     } else {
         Err(anyhow!("TV Show not found"))
     }
-}
-
-async fn fetch_episode_data(show_id: u32, season: u32, episode: u32, api_key: &str) -> Result<EpisodeData, Error> {
-    println!("Fetching episode data for show_id: {}, season: {}, episode: {}", show_id, season, episode);
-    let url = format!("https://api.themoviedb.org/3/tv/{}/season/{}/episode/{}?api_key={}", show_id, season, episode, api_key);
-    let response: serde_json::Value = reqwest::get(&url).await?.json().await?;
-    println!("Received response for episode data: {:?}", response);
-
-    let name = response["name"].as_str().unwrap_or("").to_string();
-    let season_number = response["season_number"].as_u64().unwrap_or(0) as u32;
-    let episode_number = response["episode_number"].as_u64().unwrap_or(0) as u32;
-
-    Ok(EpisodeData {
-        name,
-        season_number,
-        episode_number,
-    })
 }
 
 fn update_discord_presence(
@@ -148,7 +125,7 @@ fn update_discord_presence(
     );
 }
 
-fn clean_title(title: &str) -> String {
+fn clean_title(title: &str) -> (String, Option<(u32, u32)>) {
     // Remove file extension
     let re = Regex::new(r"\.[a-zA-Z0-9]+$").unwrap();
     let cleaned_title = re.replace_all(&title, "");
@@ -165,11 +142,20 @@ fn clean_title(title: &str) -> String {
     let re = Regex::new(r"\.").unwrap();
     let cleaned_title = re.replace_all(&cleaned_title, " ");
 
+    // Extract season and episode information if present
+    let re = Regex::new(r"S(\d{2})E(\d{2})").unwrap();
+    if let Some(caps) = re.captures(&cleaned_title) {
+        let season: u32 = caps[1].parse().unwrap();
+        let episode: u32 = caps[2].parse().unwrap();
+        let cleaned_title = re.replace_all(&cleaned_title, "").to_string();
+        return (cleaned_title.to_string(), Some((season, episode)));
+    }
+    
     // Remove everything before hyphen
     let re = Regex::new(r".*-\s*").unwrap();
     let cleaned_title = re.replace_all(&cleaned_title, "");
 
-    cleaned_title.to_string()
+    (cleaned_title.to_string(), None)
 }
 
 #[tokio::main]
@@ -209,46 +195,41 @@ async fn main() {
                 println!("VLC is playing...");
 
                 if let Ok(Some(title)) = vlc_client.lock().await.get_title() {
-                    let cleaned_title = clean_title(&title);
+                    let (cleaned_title, season_episode) = clean_title(&title);
                     // println!("Now playing: {:?}", title);
                     // println!("Cleaned title: {:?}", cleaned_title);
 
-                if let Ok(movie_data) = fetch_movie_data(&cleaned_title, &api_key).await {
-                    // println!("Fetched movie data: {:?}", movie_data);
-                    let genres: Vec<String> = movie_data.genres.iter().map(|gen| gen.name.clone()).collect();
-                    let details = format!("Genres: {}", genres.join(", "));
-                    let poster_url = format!("https://image.tmdb.org/t/p/w500{}", movie_data.poster_path);
 
-                    let imdb_url = movie_data.imdb_id.as_deref().map(|id| format!("https://www.imdb.com/title/{}/", id));
-                    let tmdb_url = format!("https://www.themoviedb.org/movie/{}", movie_data.tmdb_id);
+                    if let Some((season, episode)) = season_episode {
+                        if let Ok(tv_show_data) = fetch_tv_show_data(&cleaned_title, &api_key).await {
+                            let details = format!("S{:02}:E{:02}", season, episode);
+                            let poster_url = format!("https://image.tmdb.org/t/p/w500{}", tv_show_data.poster_path);
 
-                    update_discord_presence(&mut discord_client, &movie_data.title, &details, &poster_url, imdb_url.as_deref(), &tmdb_url);
-                } else if let Ok(tv_show_data) = fetch_tv_show_data(&cleaned_title, &api_key).await {
-                    // println!("Fetched TV show data: {:?}", tv_show_data);
+                            let imdb_url = tv_show_data.imdb_id.as_deref().map(|id| format!("https://www.imdb.com/title/{}/", id));
+                            let tmdb_url = format!("https://www.themoviedb.org/tv/{}", tv_show_data.tmdb_id);
 
-                    // Assume first season and first episode for demonstration purposes
-                    let season_number = 1;
-                    let episode_number = 1;
-
-                    if let Ok(episode_data) = fetch_episode_data(tv_show_data.tmdb_id, season_number, episode_number, &api_key).await {
-                        // println!("Fetched episode data: {:?}", episode_data);
-                        let details = format!(
-                            "{} S{}:E{}",
-                            tv_show_data.name, episode_data.season_number, episode_data.episode_number
-                        );
-                        let poster_url = format!("https://image.tmdb.org/t/p/w500{}", tv_show_data.poster_path);
-
-                        let imdb_url = tv_show_data.imdb_id.as_deref().map(|id| format!("https://www.imdb.com/title/{}/", id));
-                        let tmdb_url = format!("https://www.themoviedb.org/tv/{}", tv_show_data.tmdb_id);
-
-                        update_discord_presence(&mut discord_client, &episode_data.name, &details, &poster_url, imdb_url.as_deref(), &tmdb_url);
+                            update_discord_presence(&mut discord_client, &tv_show_data.name, &details, &poster_url, imdb_url.as_deref(), &tmdb_url);
+                        } else {
+                            println!("Could not find TV show data for title: {:?}", title);
+                        }
+                    } else {
+                        if let Ok(movie_data) = fetch_movie_data(&cleaned_title, &api_key).await {
+                            // println!("Fetched movie data: {:?}", movie_data);
+                            let genres: Vec<String> = movie_data.genres.iter().map(|gen| gen.name.clone()).collect();
+                            let details = format!("Genres: {}", genres.join(", "));
+                            let poster_url = format!("https://image.tmdb.org/t/p/w500{}", movie_data.poster_path);
+            
+                            let imdb_url = movie_data.imdb_id.as_deref().map(|id| format!("https://www.imdb.com/title/{}/", id));
+                            let tmdb_url = format!("https://www.themoviedb.org/movie/{}", movie_data.tmdb_id);
+            
+                            update_discord_presence(&mut discord_client, &movie_data.title, &details, &poster_url, imdb_url.as_deref(), &tmdb_url);
+                        } else {
+                            println!("Could not find movie data for title: {:?}", title);
+                        }
                     }
                 } else {
-                    println!("Could not find movie or TV show data for title: {:?}", title);
+                    println!("Could not retrieve title from VLC.");
                 }
-            } else {
-                println!("Could not retrieve title from VLC.");
-            }
         } else {
             println!("VLC is not playing.");
         }
