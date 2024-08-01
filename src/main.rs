@@ -33,6 +33,11 @@ struct TVShowData {
     imdb_id: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct EpisodeData {
+    name: String,
+}
+
 
 async fn fetch_movie_data(title: &str, api_key: &str) -> Result<MovieData> {
     println!("Fetching movie data for title: {}", title);
@@ -100,6 +105,15 @@ async fn fetch_tv_show_data(name: &str, api_key: &str) -> Result<TVShowData> {
     } else {
         Err(anyhow!("TV Show not found"))
     }
+}
+
+async fn fetch_episode_data(tmdb_id: u32, season: u32, episode: u32, api_key: &str) -> Result<EpisodeData> {
+    let url = format!("https://api.themoviedb.org/3/tv/{}/season/{}/episode/{}?api_key={}", tmdb_id, season, episode, api_key);
+    let response: serde_json::Value = reqwest::get(&url).await?.json().await?;
+    
+    let name = response["name"].as_str().unwrap_or("").to_string();
+
+    Ok(EpisodeData { name })
 }
 
 fn update_discord_presence(
@@ -200,13 +214,23 @@ async fn main() {
 
                     if let Some((season, episode)) = season_episode {
                         if let Ok(tv_show_data) = fetch_tv_show_data(&cleaned_title, &api_key).await {
-                            let details = format!("S{:02}:E{:02}", season, episode);
-                            let poster_url = format!("https://image.tmdb.org/t/p/w500{}", tv_show_data.poster_path);
+                            if let Ok(episode_data) = fetch_episode_data(tv_show_data.tmdb_id, season, episode, &api_key).await {
+                                let details = format!("{} S{:02}:E{:02}", tv_show_data.name, season, episode);
+                                let episode_title = if episode_data.name.is_empty() {
+                                    tv_show_data.name
+                                } else {
+                                    episode_data.name
+                                };
 
-                            let imdb_url = tv_show_data.imdb_id.as_deref().map(|id| format!("https://www.imdb.com/title/{}/", id));
-                            let tmdb_url = format!("https://www.themoviedb.org/tv/{}", tv_show_data.tmdb_id);
+                                let poster_url = format!("https://image.tmdb.org/t/p/w500{}", tv_show_data.poster_path);
 
-                            update_discord_presence(&mut discord_client, &tv_show_data.name, &details, &poster_url, imdb_url.as_deref(), &tmdb_url);
+                                let imdb_url = tv_show_data.imdb_id.as_deref().map(|id| format!("https://www.imdb.com/title/{}/", id));
+                                let tmdb_url = format!("https://www.themoviedb.org/tv/{}", tv_show_data.tmdb_id);
+
+                                update_discord_presence(&mut discord_client, &episode_title, &details, &poster_url, imdb_url.as_deref(), &tmdb_url)
+                            } else {
+                                println!("Could not find episode data for title: {:?}", title);
+                            }
                         } else {
                             println!("Could not find TV show data for title: {:?}", title);
                         }
