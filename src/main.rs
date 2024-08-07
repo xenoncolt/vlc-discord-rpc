@@ -143,29 +143,53 @@ fn clean_title(title: &str) -> (String, Option<(u32, u32)>) {
     if let Some(caps) = re.captures(&title) {
         let season: u32 = caps[1].parse().unwrap();
         let episode: u32 = caps[2].parse().unwrap();
-        let cleaned_title = re.replace_all(&title, "").to_string();
 
-        // Remove file extension
-        let re = Regex::new(r"\.[a-zA-Z0-9]+$").unwrap();
+        // Extract and clean title by removing any text after the episode information
+        let cleaned_title = &title[..caps.get(0).unwrap().end()];
+
+        // Remove extra information after year
+        let re = Regex::new(r"\d{4}").unwrap();
+        let cleaned_title = &cleaned_title[..re.find(&cleaned_title).unwrap().end()];
+
+        // Remove year
+        let re = Regex::new(r"\d{4}").unwrap();
         let cleaned_title = re.replace_all(&cleaned_title, "");
 
         // Remove extra information in brackets or parentheses
         let re = Regex::new(r"[\[\(].*?[\]\)]").unwrap();
         let cleaned_title = re.replace_all(&cleaned_title, "");
 
-        // Remove extra information after year
-        let re = Regex::new(r"\.\d{4}.*").unwrap();
-        let cleaned_title = re.replace_all(&cleaned_title, "");
-
         // Replace dots with spaces
         let re = Regex::new(r"\.").unwrap();
         let cleaned_title = re.replace_all(&cleaned_title, " ");
 
-        // Remove everything before hyphen
-        let re = Regex::new(r".*-\s*").unwrap();
+        // Remove parentheses
+        let re = Regex::new(r"\{").unwrap();
+        let cleaned_title = re.replace_all(&cleaned_title, "");
+        
+        let re = Regex::new(r"\}").unwrap();
         let cleaned_title = re.replace_all(&cleaned_title, "");
 
-        return (cleaned_title.to_string(), Some((season, episode)));
+        // Remove brackets
+        let re = Regex::new(r"\(").unwrap();
+        let cleaned_title = re.replace_all(&cleaned_title, "");
+
+        let re = Regex::new(r"\(").unwrap();
+        let cleaned_title = re.replace_all(&cleaned_title, "");
+
+        // Remove hyphens
+        let re = Regex::new(r"\-").unwrap();
+        let cleaned_title = re.replace_all(&cleaned_title, "");
+
+        // Remove multiple spaces
+        let re = Regex::new(r"\s+").unwrap();
+        let cleaned_title = re.replace_all(&cleaned_title, " ").to_string();
+
+        // Remove everything before hyphen
+        // let re = Regex::new(r".*-\s*").unwrap();
+        // let cleaned_title = re.replace_all(&cleaned_title, "");
+
+        return (cleaned_title.trim().to_string(), Some((season, episode)));
     }
 
     // Proceed with normal cleaning if no season and episode info found
