@@ -137,6 +137,25 @@ fn update_discord_presence(
     );
 }
 
+fn del_extra_info(title: &str) -> String {
+    let re = Regex::new(r"\d{4}").unwrap();
+    if let Some(matched) = re.find(title) {
+        return title[..matched.end()].to_string();
+    } else {
+        return title.to_string();
+    }
+}
+
+fn copyright(title: &str) -> String {
+    let re = Regex::new(r"^[^\|\-]+\s").unwrap();
+
+    if let Some(matched) = re.find(&title) {
+        return title[matched.end()..].to_string();
+    } else {
+        return title.to_string();
+    }
+}
+
 fn clean_title(title: &str) -> (String, Option<(u32, u32)>) {
     // Extract season and episode information if present
     let re = Regex::new(r"S(\d{2})E(\d{2})").unwrap();
@@ -148,8 +167,7 @@ fn clean_title(title: &str) -> (String, Option<(u32, u32)>) {
         let cleaned_title = &title[..caps.get(0).unwrap().end()];
 
         // Remove extra information after year
-        let re = Regex::new(r"\d{4}").unwrap();
-        let cleaned_title = &cleaned_title[..re.find(&cleaned_title).unwrap().end()];
+        let cleaned_title = del_extra_info(&cleaned_title);
 
         // Remove year
         let re = Regex::new(r"\d{4}").unwrap();
@@ -177,13 +195,24 @@ fn clean_title(title: &str) -> (String, Option<(u32, u32)>) {
         let re = Regex::new(r"\(").unwrap();
         let cleaned_title = re.replace_all(&cleaned_title, "");
 
+        // Remove copyright name if available
+        let cleaned_title = copyright(&cleaned_title);
+
+        // Remove |
+        let re = Regex::new(r"\|").unwrap();
+        let cleaned_title = re.replace_all(&cleaned_title, "");
+
         // Remove hyphens
         let re = Regex::new(r"\-").unwrap();
         let cleaned_title = re.replace_all(&cleaned_title, "");
 
         // Remove multiple spaces
         let re = Regex::new(r"\s+").unwrap();
-        let cleaned_title = re.replace_all(&cleaned_title, " ").to_string();
+        let cleaned_title = re.replace_all(&cleaned_title, " ");
+
+        // Remove Season And Episode 
+        let re = Regex::new(r"S(\d{2})E(\d{2})").unwrap();
+        let cleaned_title = re.replace_all(&cleaned_title, "").to_string();
 
         // Remove everything before hyphen
         // let re = Regex::new(r".*-\s*").unwrap();
@@ -261,7 +290,7 @@ async fn main() {
                     if let Some((season, episode)) = season_episode {
                         if let Ok(tv_show_data) = fetch_tv_show_data(&cleaned_title, &api_key).await {
                             if let Ok(episode_data) = fetch_episode_data(tv_show_data.tmdb_id, season, episode, &api_key).await {
-                                let details = format!("{} S{:02}:E{:02}", tv_show_data.name, season, episode);
+                                let details = format!("{} • S{:02}:E{:02}", tv_show_data.name, season, episode);
                                 let episode_title = if episode_data.name.is_empty() {
                                     tv_show_data.name
                                 } else {
