@@ -147,7 +147,7 @@ fn del_extra_info(title: &str) -> String {
 }
 
 fn copyright(title: &str) -> String {
-    let re = Regex::new(r"^[^\|\-]+\s").unwrap();
+    let re = Regex::new(r"^[\|\-]+\s|^[\|\-]").unwrap();
 
     if let Some(matched) = re.find(&title) {
         return title[matched.end()..].to_string();
