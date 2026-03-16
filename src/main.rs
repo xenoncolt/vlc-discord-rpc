@@ -1,15 +1,16 @@
+mod settings;
+mod title;
 mod update;
+mod vlc;
+mod vlc_setup;
 
-use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
-use anyhow::{Result, anyhow};
+use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 use serde::Deserialize;
-use std::sync::Arc;
-use std::thread::sleep;
-use std::time::Duration;
-use std::vec;
-use vlc_rc::Client as VlcClient;
-use regex::Regex;
-use tokio::sync::Mutex;
+use settings::RunMode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use vlc::PlaybackState;
+
+// TMDB Data Structures
 
 #[derive(Deserialize)]
 struct MovieData {
@@ -38,63 +39,124 @@ struct EpisodeData {
     name: String,
 }
 
+// Cached Discord Presence
 
-async fn fetch_movie_data(title: &str, api_key: &str) -> Result<MovieData> {
-    println!("Fetching movie data for title: {}", title);
-    let url = format!("https://api.themoviedb.org/3/search/movie?api_key={}&query={}", api_key, title);
+struct PresenceInfo {
+    title: String,
+    details: String,
+    poster_url: String,
+    imdb_url: Option<String>,
+    tmdb_url: String,
+}
+
+// TMDB Fetch Functions
+
+fn urlencode(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            ' ' => "%20".to_string(),
+            '&' => "%26".to_string(),
+            '?' => "%3F".to_string(),
+            '#' => "%23".to_string(),
+            '+' => "%2B".to_string(),
+            _ => c.to_string(),
+        })
+        .collect()
+}
+
+async fn fetch_movie_data(
+    title: &str,
+    year: Option<u32>,
+    api_key: &str,
+) -> anyhow::Result<MovieData> {
+    println!("  Fetching movie data for: \"{}\"", title);
+
+    let mut url = format!(
+        "https://api.themoviedb.org/3/search/movie?api_key={}&query={}",
+        api_key,
+        urlencode(title)
+    );
+    if let Some(y) = year {
+        url.push_str(&format!("&year={}", y));
+    }
+
     let response: serde_json::Value = reqwest::get(&url).await?.json().await?;
-    // println!("Received response for movie data: {:?}", response);
 
-    if let Some(movie) = response["results"].as_array().and_then(|a| a.get(0)) {
+    if let Some(movie) = response["results"].as_array().and_then(|a| a.first()) {
         let title = movie["title"].as_str().unwrap_or("").to_string();
-        let genre_ids = movie["genre_ids"].as_array().unwrap_or(&vec![]).iter().map(|gen| gen.as_i64().unwrap_or(0)).collect::<Vec<_>>();
-        let genres: Vec<Genre> = fetch_genres(&genre_ids, api_key).await?.into_iter().map(|name| Genre { name }).collect(); // Convert Vec<String> to Vec<Genre>
-
+        let genre_ids: Vec<i64> = movie["genre_ids"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|g| g.as_i64())
+            .collect();
+        let genres = fetch_genres(&genre_ids, api_key).await?;
         let poster_path = movie["poster_path"].as_str().unwrap_or("").to_string();
-
         let tmdb_id = movie["id"].as_u64().unwrap_or(0) as u32;
-        let movie_detail_url = format!("https://api.themoviedb.org/3/movie/{}?api_key={}", tmdb_id, api_key);
-        let movie_detail_response: serde_json::Value = reqwest::get(&movie_detail_url).await?.json().await?;
 
-        let imdb_id = movie_detail_response["imdb_id"].as_str().map(|s| s.to_string());
+        // Fetch IMDB ID from movie details
+        let detail_url = format!(
+            "https://api.themoviedb.org/3/movie/{}?api_key={}",
+            tmdb_id, api_key
+        );
+        let detail: serde_json::Value = reqwest::get(&detail_url).await?.json().await?;
+        let imdb_id = detail["imdb_id"].as_str().map(|s| s.to_string());
 
         Ok(MovieData {
             title,
-            genres,
+            genres: genres.into_iter().map(|name| Genre { name }).collect(),
             poster_path,
-            imdb_id,
             tmdb_id,
+            imdb_id,
         })
     } else {
-        Err(anyhow!("Movie not found"))
+        Err(anyhow::anyhow!("Movie not found"))
     }
 }
 
-async fn fetch_genres(genre_ids: &[i64], api_key: &str) -> Result<Vec<String>> {
-    let url = format!("https://api.themoviedb.org/3/genre/movie/list?api_key={}", api_key);
+async fn fetch_genres(genre_ids: &[i64], api_key: &str) -> anyhow::Result<Vec<String>> {
+    let url = format!(
+        "https://api.themoviedb.org/3/genre/movie/list?api_key={}",
+        api_key
+    );
     let response: serde_json::Value = reqwest::get(&url).await?.json().await?;
 
-    let genres = genre_ids.iter()
-        .filter_map(|id| response["genres"].as_array().unwrap_or(&vec![]).iter()
-            .find(|g| g["id"].as_i64() == Some(*id)).and_then(|ge| ge["name"].as_str().map(|s| s.to_string())))
+    let genres = genre_ids
+        .iter()
+        .filter_map(|id| {
+            response["genres"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .find(|g| g["id"].as_i64() == Some(*id))
+                .and_then(|g| g["name"].as_str().map(|s| s.to_string()))
+        })
         .collect();
     Ok(genres)
 }
 
-async fn fetch_tv_show_data(name: &str, api_key: &str) -> Result<TVShowData> {
-    println!("Fetching TV Show data for name: {}", name);
-    let url = format!("https://api.themoviedb.org/3/search/tv?api_key={}&query={}", api_key, name);
-    let response: serde_json::Value = reqwest::get(&url).await?.json().await?;
-    // println!("Received response for TV Show data: {:?}", response);
+async fn fetch_tv_show_data(name: &str, api_key: &str) -> anyhow::Result<TVShowData> {
+    println!("  Fetching TV show data for: \"{}\"", name);
 
-    if let Some(show) = response["results"].as_array().and_then(|a| a.get(0)) {
-        let tmdb_id =  show["id"].as_u64().unwrap_or(0) as u32;
+    let url = format!(
+        "https://api.themoviedb.org/3/search/tv?api_key={}&query={}",
+        api_key,
+        urlencode(name)
+    );
+    let response: serde_json::Value = reqwest::get(&url).await?.json().await?;
+
+    if let Some(show) = response["results"].as_array().and_then(|a| a.first()) {
+        let tmdb_id = show["id"].as_u64().unwrap_or(0) as u32;
         let name = show["name"].as_str().unwrap_or("").to_string();
         let poster_path = show["poster_path"].as_str().unwrap_or("").to_string();
 
-        let show_detail_url = format!("https://api.themoviedb.org/3/tv/{}?api_key={}", tmdb_id, api_key);
-        let show_detail_response: serde_json::Value = reqwest::get(&show_detail_url).await?.json().await?;
-        let imdb_id = show_detail_response["external_ids"]["imdb_id"].as_str().map(|s|s.to_string());
+        // Fetch IMDB ID from external IDs
+        let detail_url = format!(
+            "https://api.themoviedb.org/3/tv/{}/external_ids?api_key={}",
+            tmdb_id, api_key
+        );
+        let detail: serde_json::Value = reqwest::get(&detail_url).await?.json().await?;
+        let imdb_id = detail["imdb_id"].as_str().map(|s| s.to_string());
 
         Ok(TVShowData {
             tmdb_id,
@@ -103,233 +165,486 @@ async fn fetch_tv_show_data(name: &str, api_key: &str) -> Result<TVShowData> {
             imdb_id,
         })
     } else {
-        Err(anyhow!("TV Show not found"))
+        Err(anyhow::anyhow!("TV show not found"))
     }
 }
 
-async fn fetch_episode_data(tmdb_id: u32, season: u32, episode: u32, api_key: &str) -> Result<EpisodeData> {
-    let url = format!("https://api.themoviedb.org/3/tv/{}/season/{}/episode/{}?api_key={}", tmdb_id, season, episode, api_key);
+async fn fetch_episode_data(
+    tmdb_id: u32,
+    season: u32,
+    episode: u32,
+    api_key: &str,
+) -> anyhow::Result<EpisodeData> {
+    let url = format!(
+        "https://api.themoviedb.org/3/tv/{}/season/{}/episode/{}?api_key={}",
+        tmdb_id, season, episode, api_key
+    );
     let response: serde_json::Value = reqwest::get(&url).await?.json().await?;
-    
     let name = response["name"].as_str().unwrap_or("").to_string();
-
     Ok(EpisodeData { name })
 }
 
+// Discord Presence
+/// Send a Discord activity with type=3 (Watching) using raw JSON.
+/// The discord-rich-presence crate's Activity struct doesn't support the `type` field,
+/// so we construct the payload manually and use the low-level `send()` method.
 fn update_discord_presence(
+    client: &mut DiscordIpcClient,
+    info: &PresenceInfo,
+    state: &PlaybackState,
+    time_remaining_secs: Option<u64>,
+    show_time: bool,
+) {
+    let state_text = match state {
+        PlaybackState::Playing => info.details.as_str(),
+        PlaybackState::Paused => "Paused",
+        PlaybackState::Stopped => "Stopped",
+    };
+
+    // Build activity JSON with type=3 (Watching)
+    let mut activity = serde_json::json!({
+        "type": 3,
+        "state": state_text,
+        "details": info.title,
+    });
+
+    // Add poster image
+    if !info.poster_url.is_empty() {
+        activity["assets"] = serde_json::json!({
+            "large_image": info.poster_url,
+            "large_text": info.title,
+        });
+    }
+
+    // Add TMDB/IMDB buttons
+    let mut buttons = Vec::new();
+    if !info.tmdb_url.is_empty() {
+        buttons.push(serde_json::json!({"label": "TMDB", "url": info.tmdb_url}));
+    }
+    if let Some(ref imdb_url) = info.imdb_url {
+        buttons.push(serde_json::json!({"label": "IMDB", "url": imdb_url}));
+    }
+    if !buttons.is_empty() {
+        activity["buttons"] = serde_json::json!(buttons);
+    }
+
+    // Add countdown timestamp (only when actively playing)
+    if show_time && *state == PlaybackState::Playing {
+        if let Some(remaining) = time_remaining_secs {
+            if remaining > 0 {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+                let end_time = now + remaining as i64;
+                activity["timestamps"] = serde_json::json!({"end": end_time});
+            }
+        }
+    }
+
+    // Send via raw IPC (SET_ACTIVITY with opcode 1)
+    let nonce = format!(
+        "{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let data = serde_json::json!({
+        "cmd": "SET_ACTIVITY",
+        "args": {
+            "pid": std::process::id(),
+            "activity": activity
+        },
+        "nonce": nonce
+    });
+
+    if let Err(e) = client.send(data, 1) {
+        eprintln!("  Warning: Failed to update Discord presence: {}", e);
+    }
+}
+
+/// Send a basic "Watching" activity for titles not found on TMDB.
+fn update_basic_presence(
     client: &mut DiscordIpcClient,
     title: &str,
     details: &str,
-    large_image_key: &str,
-    imdb_url: Option<&str>,
-    tmdb_url: &str,
 ) {
-    // println!("Update Discord Rich Presence: {}, Details: {}, Image: {}", title, details, large_image_key);
-    let mut button: Vec<activity::Button> = vec![activity::Button::new("TMDB", tmdb_url)];
-    if let Some(imdb_url) = imdb_url {
-        button.push(activity::Button::new("IMDB", imdb_url));
-    }
-    let _ = client.set_activity(activity::Activity::new()
-        .state(details)
-        .details(title)
-        .assets(activity::Assets::new().large_image(large_image_key).large_text(title))
-        .buttons(button)
+    let nonce = format!(
+        "{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     );
+    let data = serde_json::json!({
+        "cmd": "SET_ACTIVITY",
+        "args": {
+            "pid": std::process::id(),
+            "activity": {
+                "type": 3,
+                "state": details,
+                "details": title,
+            }
+        },
+        "nonce": nonce
+    });
+    if let Err(e) = client.send(data, 1) {
+        eprintln!("  Warning: Failed to update Discord presence: {}", e);
+    }
 }
 
-fn del_extra_info(title: &str) -> String {
-    let re = Regex::new(r"\d{4}").unwrap();
-    if let Some(matched) = re.find(title) {
-        return title[..matched.end()].to_string();
+fn clear_discord_presence(client: &mut DiscordIpcClient) {
+    let _ = client.clear_activity();
+}
+
+// VLC Process Detection (Windows)
+
+/// Check if vlc.exe is running (Windows only, uses tasklist).
+#[cfg(windows)]
+fn is_vlc_process_running() -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq vlc.exe", "/FO", "CSV", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.to_lowercase().contains("vlc.exe")
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn is_vlc_process_running() -> bool {
+    false
+}
+
+// TMDB to Presence Converters
+
+async fn fetch_tv_presence(
+    name: &str,
+    season: u32,
+    episode: u32,
+    api_key: &str,
+) -> Option<PresenceInfo> {
+    let tv_data = fetch_tv_show_data(name, api_key).await.ok()?;
+    let ep_data = fetch_episode_data(tv_data.tmdb_id, season, episode, api_key)
+        .await
+        .ok();
+
+    let episode_title = ep_data
+        .as_ref()
+        .map(|e| e.name.as_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or(&tv_data.name);
+
+    let details = format!("{} - S{:02}E{:02}", tv_data.name, season, episode);
+    let poster_url = if tv_data.poster_path.is_empty() {
+        String::new()
     } else {
-        return title.to_string();
-    }
+        format!("https://image.tmdb.org/t/p/w500{}", tv_data.poster_path)
+    };
+    let imdb_url = tv_data
+        .imdb_id
+        .as_deref()
+        .map(|id| format!("https://www.imdb.com/title/{}/", id));
+    let tmdb_url = format!("https://www.themoviedb.org/tv/{}", tv_data.tmdb_id);
+
+    Some(PresenceInfo {
+        title: episode_title.to_string(),
+        details,
+        poster_url,
+        imdb_url,
+        tmdb_url,
+    })
 }
 
-fn copyright(title: &str) -> String {
-    let re = Regex::new(r"^[\|\-]+\s|^[\|\-]").unwrap();
+async fn fetch_movie_presence(
+    name: &str,
+    year: Option<u32>,
+    api_key: &str,
+) -> Option<PresenceInfo> {
+    let movie_data = fetch_movie_data(name, year, api_key).await.ok()?;
 
-    if let Some(matched) = re.find(&title) {
-        return title[matched.end()..].to_string();
+    let genres: Vec<String> = movie_data.genres.iter().map(|g| g.name.clone()).collect();
+    let details = if genres.is_empty() {
+        "Watching a movie".to_string()
     } else {
-        return title.to_string();
-    }
+        genres.join(", ")
+    };
+    let poster_url = if movie_data.poster_path.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "https://image.tmdb.org/t/p/w500{}",
+            movie_data.poster_path
+        )
+    };
+    let imdb_url = movie_data
+        .imdb_id
+        .as_deref()
+        .map(|id| format!("https://www.imdb.com/title/{}/", id));
+    let tmdb_url = format!(
+        "https://www.themoviedb.org/movie/{}",
+        movie_data.tmdb_id
+    );
+
+    Some(PresenceInfo {
+        title: movie_data.title,
+        details,
+        poster_url,
+        imdb_url,
+        tmdb_url,
+    })
 }
 
-fn clean_title(title: &str) -> (String, Option<(u32, u32)>) {
-    // Extract season and episode information if present
-    let re = Regex::new(r"S(\d{2})E(\d{2})").unwrap();
-    if let Some(caps) = re.captures(&title) {
-        let season: u32 = caps[1].parse().unwrap();
-        let episode: u32 = caps[2].parse().unwrap();
-
-        // Extract and clean title by removing any text after the episode information
-        let cleaned_title = &title[..caps.get(0).unwrap().end()];
-
-        // Remove extra information after year
-        let cleaned_title = del_extra_info(&cleaned_title);
-
-        // Remove year
-        let re = Regex::new(r"\d{4}").unwrap();
-        let cleaned_title = re.replace_all(&cleaned_title, "");
-
-        // Remove extra information in brackets or parentheses
-        let re = Regex::new(r"[\[\(].*?[\]\)]").unwrap();
-        let cleaned_title = re.replace_all(&cleaned_title, "");
-
-        // Replace dots with spaces
-        let re = Regex::new(r"\.").unwrap();
-        let cleaned_title = re.replace_all(&cleaned_title, " ");
-
-        // Remove parentheses
-        let re = Regex::new(r"\{").unwrap();
-        let cleaned_title = re.replace_all(&cleaned_title, "");
-        
-        let re = Regex::new(r"\}").unwrap();
-        let cleaned_title = re.replace_all(&cleaned_title, "");
-
-        // Remove brackets
-        let re = Regex::new(r"\(").unwrap();
-        let cleaned_title = re.replace_all(&cleaned_title, "");
-
-        let re = Regex::new(r"\(").unwrap();
-        let cleaned_title = re.replace_all(&cleaned_title, "");
-
-        // Remove copyright name if available
-        let cleaned_title = copyright(&cleaned_title);
-
-        // Remove |
-        let re = Regex::new(r"\|").unwrap();
-        let cleaned_title = re.replace_all(&cleaned_title, "");
-
-        // Remove hyphens
-        let re = Regex::new(r"\-").unwrap();
-        let cleaned_title = re.replace_all(&cleaned_title, "");
-
-        // Remove multiple spaces
-        let re = Regex::new(r"\s+").unwrap();
-        let cleaned_title = re.replace_all(&cleaned_title, " ");
-
-        // Remove Season And Episode 
-        let re = Regex::new(r"S(\d{2})E(\d{2})").unwrap();
-        let cleaned_title = re.replace_all(&cleaned_title, "").to_string();
-
-        // Remove everything before hyphen
-        // let re = Regex::new(r".*-\s*").unwrap();
-        // let cleaned_title = re.replace_all(&cleaned_title, "");
-
-        return (cleaned_title.trim().to_string(), Some((season, episode)));
-    }
-
-    // Proceed with normal cleaning if no season and episode info found
-    // Remove file extension
-    let re = Regex::new(r"\.[a-zA-Z0-9]+$").unwrap();
-    let cleaned_title = re.replace_all(&title, "");
-
-    // Remove extra information in brackets or parentheses
-    let re = Regex::new(r"[\[\(].*?[\]\)]").unwrap();
-    let cleaned_title = re.replace_all(&cleaned_title, "");
-
-    // Remove extra information after year
-    let re = Regex::new(r"\.\d{4}.*").unwrap();
-    let cleaned_title = re.replace_all(&cleaned_title, "");
-
-    // Replace dots with spaces
-    let re = Regex::new(r"\.").unwrap();
-    let cleaned_title = re.replace_all(&cleaned_title, " ");
-    
-    // Remove everything before hyphen
-    let re = Regex::new(r".*-\s*").unwrap();
-    let cleaned_title = re.replace_all(&cleaned_title, "");
-
-    (cleaned_title.to_string(), None)
-}
+// Main Entry Point 
 
 #[tokio::main]
 async fn main() {
-    // checking update
-    
-    update::update().await; // i know i waste my time 
-    println!("Starting VLC Discord RPC...");
+    println!();
+    println!("  ╔═══════════════════════════════════╗");
+    println!("  ║     VLC Discord Rich Presence     ║");
+    println!("  ╚═══════════════════════════════════╝");
+    println!();
 
-    // let client_id = env::var("CLIENT_ID").expect("CLIENT_ID must be set in .env file");
-    // let api_key = env::var("API_KEY").expect("API_KEY must be set in .env file");
+    // CLI argument handling 
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("  Usage: vlc-discord-rpc [OPTIONS]");
+        println!();
+        println!("  Options:");
+        println!("    --setup    Run interactive configuration wizard");
+        println!("    --help     Show this help message");
+        println!();
+        println!("  Config file: {}", settings::Config::config_path().display());
+        println!();
+        return;
+    }
+
+    let run_setup = args.iter().any(|a| a == "--setup");
+
+    // Load or create configuration
+    let config = if run_setup {
+        let config = settings::Config::setup_wizard();
+        if let Err(e) = config.save() {
+            eprintln!("  Warning: Could not save config: {}", e);
+        }
+        println!();
+        config
+    } else {
+        let first_run = !settings::Config::config_path().exists();
+        settings::Config::load(first_run)
+    };
+
+    println!(
+        "  Config loaded (polling every {}s, mode: {}).\n",
+        config.discord.polling_interval, config.app.run_mode
+    );
+
+    // Check for updates
+    if config.app.check_updates {
+        update::update().await;
+    }
+
+    // Auto-configure VLC RC interface if enabled
+    if config.app.auto_configure_vlc {
+        vlc_setup::ensure_vlc_configured(config.vlc.port);
+    }
+
     let client_id = env!("CLIENT_ID");
     let api_key = env!("API_KEY");
 
-    let mut discord_client = DiscordIpcClient::new(client_id).expect("Failed to create DiscordIpcClient");
-    discord_client.connect().expect("Failed to connect to discord client.");
-    println!("Discord client started.");
-
-    let vlc_host = "127.0.0.1:9090";
-
-    let vlc_client = Arc::new(Mutex::new(
-        match VlcClient::connect(vlc_host) {
-            Ok(client) => {
-                println!("Connected to VLC at {}", vlc_host);
-                client
-            }
+    // Connect to Discord (with retry loop)
+    println!("  Connecting to Discord...");
+    let mut discord_client = loop {
+        match DiscordIpcClient::new(client_id) {
+            Ok(mut client) => match client.connect() {
+                Ok(_) => {
+                    println!("  Connected to Discord.\n");
+                    break client;
+                }
+                Err(e) => {
+                    println!("  Waiting for Discord... ({})", e);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            },
             Err(e) => {
-                println!("Failed to connect to VLC: {:?}", e);
-                return;
+                println!("  Waiting for Discord... ({})", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
-    ));
+    };
+
+    let poll_interval = Duration::from_secs(config.discord.polling_interval);
+
+    // State tracking
+    let mut vlc_client: Option<vlc::VlcClient> = None;
+    let mut last_title: Option<String> = None;
+    let mut cached_presence: Option<PresenceInfo> = None;
+    let mut was_connected = false;
+    let mut waiting_logged = false;
+
+    println!("  Ready! Waiting for VLC...\n");
 
     loop {
-        println!("Checking if VLC is playing...");
-            if vlc_client.lock().await.is_playing().unwrap_or(false) {
-                println!("VLC is playing...");
+        // Checking VLC connection
+        let vlc_alive = vlc_client.as_mut().is_some_and(|c| c.ping());
 
-                if let Ok(Some(title)) = vlc_client.lock().await.get_title() {
-                    let (cleaned_title, season_episode) = clean_title(&title);
-                    // println!("Now playing: {:?}", title);
-                    // println!("Cleaned title: {:?}", cleaned_title);
+        if !vlc_alive {
+            if was_connected {
+                println!("  VLC disconnected. Clearing Discord status...");
+                clear_discord_presence(&mut discord_client);
+                last_title = None;
+                cached_presence = None;
+                was_connected = false;
+                waiting_logged = false;
 
+                // Exit if run mode is exit_on_close
+                if config.app.run_mode == RunMode::ExitOnClose {
+                    println!("  Run mode is 'exit_on_close'. Exiting...");
+                    let _ = discord_client.close();
+                    return;
+                }
+            }
 
-                    if let Some((season, episode)) = season_episode {
-                        if let Ok(tv_show_data) = fetch_tv_show_data(&cleaned_title, &api_key).await {
-                            if let Ok(episode_data) = fetch_episode_data(tv_show_data.tmdb_id, season, episode, &api_key).await {
-                                let details = format!("{} • S{:02}:E{:02}", tv_show_data.name, season, episode);
-                                let episode_title = if episode_data.name.is_empty() {
-                                    tv_show_data.name
-                                } else {
-                                    episode_data.name
-                                };
-
-                                let poster_url = format!("https://image.tmdb.org/t/p/w500{}", tv_show_data.poster_path);
-
-                                let imdb_url = tv_show_data.imdb_id.as_deref().map(|id| format!("https://www.imdb.com/title/{}/", id));
-                                let tmdb_url = format!("https://www.themoviedb.org/tv/{}", tv_show_data.tmdb_id);
-
-                                update_discord_presence(&mut discord_client, &episode_title, &details, &poster_url, imdb_url.as_deref(), &tmdb_url)
-                            } else {
-                                println!("Could not find episode data for title: {:?}", title);
-                            }
-                        } else {
-                            println!("Could not find TV show data for title: {:?}", title);
+            vlc_client = None;
+            match vlc::VlcClient::connect(&config.vlc.host, config.vlc.port) {
+                Ok(client) => {
+                    println!("  Connected to VLC at {}.", config.vlc_address());
+                    vlc_client = Some(client);
+                    was_connected = true;
+                    waiting_logged = false;
+                }
+                Err(_) => {
+                    if !waiting_logged {
+                        println!(
+                            "  Waiting for VLC on port {}...",
+                            config.vlc.port
+                        );
+                        // VLC process detected but RC not responding
+                        if is_vlc_process_running() {
+                            println!("  (VLC is running but RC interface isn't responding.)");
+                            println!("  (Restart VLC for auto-configuration to take effect.)\n");
                         }
+                        waiting_logged = true;
+                    }
+                    tokio::time::sleep(poll_interval).await;
+                    continue;
+                }
+            }
+        }
+
+        let vlc = vlc_client.as_mut().unwrap();
+
+        // Get playback state
+        let state = match vlc.get_state() {
+            Ok(s) => s,
+            Err(_) => {
+                vlc_client = None;
+                continue;
+            }
+        };
+
+        match state {
+            PlaybackState::Stopped => {
+                if last_title.is_some() {
+                    println!("  Playback stopped.");
+                    clear_discord_presence(&mut discord_client);
+                    last_title = None;
+                    cached_presence = None;
+                }
+            }
+
+            PlaybackState::Playing | PlaybackState::Paused => {
+                // Get current media info 
+                let current_title = match vlc.get_title() {
+                    Ok(Some(t)) => t,
+                    Ok(None) => {
+                        tokio::time::sleep(poll_interval).await;
+                        continue;
+                    }
+                    Err(_) => {
+                        vlc_client = None;
+                        continue;
+                    }
+                };
+
+                // Get time info for timestamp
+                let elapsed = vlc.get_time().unwrap_or(None);
+                let total_length = vlc.get_length().unwrap_or(None);
+                let time_remaining = match (elapsed, total_length) {
+                    (Some(e), Some(t)) if t > e => Some(t - e),
+                    _ => None,
+                };
+
+                // Fetch TMDB data if title changed
+                let title_changed = last_title.as_ref() != Some(&current_title);
+
+                if title_changed {
+                    println!("  Now playing: {}", current_title);
+                    let cleaned = title::clean_title(&current_title);
+                    println!(
+                        "  Cleaned: \"{}\" | Year: {:?} | Episode: {:?}",
+                        cleaned.name, cleaned.year, cleaned.season_episode
+                    );
+
+                    let presence = if let Some((season, episode)) = cleaned.season_episode {
+                        fetch_tv_presence(&cleaned.name, season, episode, api_key).await
                     } else {
-                        if let Ok(movie_data) = fetch_movie_data(&cleaned_title, &api_key).await {
-                            // println!("Fetched movie data: {:?}", movie_data);
-                            let genres: Vec<String> = movie_data.genres.iter().map(|gen| gen.name.clone()).collect();
-                            let details = format!("Genres: {}", genres.join(", "));
-                            let poster_url = format!("https://image.tmdb.org/t/p/w500{}", movie_data.poster_path);
-            
-                            let imdb_url = movie_data.imdb_id.as_deref().map(|id| format!("https://www.imdb.com/title/{}/", id));
-                            let tmdb_url = format!("https://www.themoviedb.org/movie/{}", movie_data.tmdb_id);
-            
-                            update_discord_presence(&mut discord_client, &movie_data.title, &details, &poster_url, imdb_url.as_deref(), &tmdb_url);
-                        } else {
-                            println!("Could not find movie data for title: {:?}", title);
+                        fetch_movie_presence(&cleaned.name, cleaned.year, api_key).await
+                    };
+
+                    match presence {
+                        Some(info) => {
+                            println!("  Found: \"{}\" - {}", info.title, info.details);
+                            update_discord_presence(
+                                &mut discord_client,
+                                &info,
+                                &state,
+                                time_remaining,
+                                config.discord.show_time_remaining,
+                            );
+                            cached_presence = Some(info);
+                        }
+                        None => {
+                            println!("  Not found on TMDB. Showing basic status.");
+                            let basic_info = PresenceInfo {
+                                title: cleaned.name.clone(),
+                                details: "Watching".to_string(),
+                                poster_url: String::new(),
+                                imdb_url: None,
+                                tmdb_url: String::new(),
+                            };
+                            update_basic_presence(
+                                &mut discord_client,
+                                &cleaned.name,
+                                "Watching",
+                            );
+                            cached_presence = Some(basic_info);
                         }
                     }
-                } else {
-                    println!("Could not retrieve title from VLC.");
+
+                    last_title = Some(current_title);
+                } else if let Some(ref info) = cached_presence {
+                    // Same title — update timestamp/state
+                    update_discord_presence(
+                        &mut discord_client,
+                        info,
+                        &state,
+                        time_remaining,
+                        config.discord.show_time_remaining,
+                    );
                 }
-        } else {
-            println!("VLC is not playing.");
+            }
         }
-        sleep(Duration::from_secs(10)); // Adjust the sleep duration as needed
+
+        tokio::time::sleep(poll_interval).await;
     }
 }
